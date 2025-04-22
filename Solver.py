@@ -1,173 +1,367 @@
-from typing import List, Dict, Tuple, Optional
-from MoveSorter import MoveSorter
+from typing import List, Optional
 from Position import Position
+from MoveSorter import MoveSorter
 from TranspositionTable import TranspositionTable
+from OpeningBook import OpeningBook
 
 class Solver:
+    """
+    Connect 4 solver using Negamax algorithm with alpha-beta pruning
+    and various optimization techniques.
+    """
     INVALID_MOVE = -1000
-    WIN_SCORE = 1000000
-    
+
     def __init__(self):
-        self.transposition_table = {}
-        self.column_order = [3, 2, 4, 1, 5, 0, 6]  # Center-first ordering
-    
-    def analyze(self, position: Position) -> List[int]:
-        scores = [self.INVALID_MOVE] * Position.WIDTH
+        """Initialize the solver"""
+        self.node_count = 0
+        self.trans_table = {}  # Use an empty dict as transposition table
+        self.opening_book = OpeningBook()  # Initialize opening book
+        self.column_order = [3, 4, 2, 5, 1, 6, 0]
+
+    def load_book(self, book_file: str) -> None:
+        """Load opening book from file"""
+        return self.opening_book.load_from_file(book_file)
+
+    def save_book(self, book_file: str) -> None:
+        """Save opening book to file"""
+        return self.opening_book.save_to_file(book_file)
+
+    def check_book_move(self, position: Position, ai_player: int) -> int:
+        """
+        Check if there's a move in the opening book
         
-        # Check each column for valid moves
-        for col in range(Position.WIDTH):
-            if not position.can_play(col):
-                continue
-                
-            # Check if this is a winning move
-            if position.is_winning_move(col):
-                scores[col] = self.WIN_SCORE
-                return scores  # Immediate win takes priority
-        
-        # Check if we need to block opponent's win
-        for col in range(Position.WIDTH):
-            if not position.can_play(col):
-                continue
-                
-            # Create opponent's position by flipping current player
-            opponent_pos = Position(position.current_position ^ position.mask, position.mask, position.moves)
-            if opponent_pos.is_winning_move(col):
-                scores[col] = self.WIN_SCORE - 1  # Very high priority, but less than winning
-        
-        # For all valid columns, evaluate using minimax
-        for col in range(Position.WIDTH):
-            if not position.can_play(col):
-                continue
-                
-            if scores[col] == self.INVALID_MOVE:  # If not already scored (win or block)
-                # Make the move
-                new_pos = Position(position.current_position, position.mask, position.moves)
-                new_pos.play_col(col)
-                
-                # Run minimax with reasonable depth
-                scores[col] = -self.minimax(new_pos, 4, -float('inf'), float('inf'))
-                print(f"Col {col+1}: score {scores[col]}")
-        
-        return scores
-    
-    def minimax(self, position: Position, depth: int, alpha: int, beta: int) -> int:
-        """Negamax implementation of minimax with alpha-beta pruning"""
-        if position.moves == Position.WIDTH * Position.HEIGHT:
-            return 0  # Draw
-        
-        # Check for immediate win
-        for col in range(Position.WIDTH):
-            if position.can_play(col) and position.is_winning_move(col):
-                return (Position.WIDTH * Position.HEIGHT + 1 - position.moves) // 2
-        
-        if depth == 0:
-            return self.evaluate(position)
-        
-        max_score = -float('inf')
-        
-        # Try each column
-        for col in self.column_order:
-            if position.can_play(col):
-                # Make the move
-                new_pos = Position(position.current_position, position.mask, position.moves)
-                new_pos.play_col(col)
-                
-                # Recursive evaluation with negation (negamax)
-                score = -self.minimax(new_pos, depth - 1, -beta, -alpha)
-                
-                max_score = max(max_score, score)
-                alpha = max(alpha, score)
-                
-                if alpha >= beta:
-                    break  # Pruning
-        
-        return max_score
-    
-    def evaluate(self, position: Position) -> int:
-        """Evaluate the position from current player's perspective"""
-        score = 0
-        
-        # Check all possible winning lines
-        for row in range(Position.HEIGHT):
-            for col in range(Position.WIDTH):
-                # Check horizontal lines
-                if col <= Position.WIDTH - 4:
-                    score += self.evaluate_line(position, col, row, 1, 0)
-                
-                # Check vertical lines
-                if row <= Position.HEIGHT - 4:
-                    score += self.evaluate_line(position, col, row, 0, 1)
-                
-                # Check diagonal lines (/)
-                if col <= Position.WIDTH - 4 and row <= Position.HEIGHT - 4:
-                    score += self.evaluate_line(position, col, row, 1, 1)
-                
-                # Check diagonal lines (\)
-                if col <= Position.WIDTH - 4 and row >= 3:
-                    score += self.evaluate_line(position, col, row, 1, -1)
-        
-        # Bonus for center control
-        for row in range(Position.HEIGHT):
-            if position.get_cell(3, row) == 'X':  # Middle column
-                score += 3
-        
-        return score
-    
-    def evaluate_line(self, position: Position, col: int, row: int, delta_col: int, delta_row: int) -> int:
-        """Evaluate a line of 4 cells"""
-        # Get the 4 cells in this line
-        cells = []
-        for i in range(4):
-            new_col = col + i * delta_col
-            new_row = row + i * delta_row
+        Args:
+            position: Current position
+            ai_player: AI player number (1 or 2)
             
-            if 0 <= new_col < Position.WIDTH and 0 <= new_row < Position.HEIGHT:
-                cells.append(position.get_cell(new_col, new_row))
-            else:
-                return 0  # Out of bounds
+        Returns:
+            Column to play or None if no book move found
+        """
+        return self.opening_book.find_next_move(position, ai_player)
+
+    def add_to_book(self, sequence: str, winner: int) -> None:
+        """Add a sequence to the opening book"""
+        self.opening_book.add_sequence(sequence, winner)
+
+    def negamax(self, position: Position, alpha: int, beta: int, depth: int = 0, max_depth: int = 16) -> int:
+        assert alpha < beta
+        assert not position.can_win_next()
         
-        # Count pieces
-        count_x = cells.count('X')
-        count_o = cells.count('O')
-        count_empty = cells.count('.')
+        self.node_count += 1  # Increment counter of explored nodes
         
-        # Cannot have both X and O in a winning line
-        if count_x > 0 and count_o > 0:
+        # Check max depth if specified
+        if max_depth is not None and depth >= max_depth:
+            return self.evaluate_position(position)
+        
+        # Check if there are valid moves
+        possible = position.possible_non_losing_moves()
+        if possible == 0:  # No possible non-losing moves, opponent wins next move
+            return -((Position.WIDTH * Position.HEIGHT - position.nb_moves()) // 2)
+        
+        # Check for draw game
+        if position.nb_moves() >= Position.WIDTH * Position.HEIGHT - 2:
             return 0
         
-        # Current player's perspective
-        current_player = 'X' if position.moves % 2 == 1 else 'O'
-        opponent = 'O' if current_player == 'X' else 'X'
+        # Lower bound of score as opponent cannot win next move
+        min_score = -((Position.WIDTH * Position.HEIGHT - 2 - position.nb_moves()) // 2)
+        if alpha < min_score:
+            alpha = min_score
+            if alpha >= beta:
+                return alpha  # Prune if window is empty
         
-        # Current player's pieces
-        if count_x > 0 and current_player == 'X':
-            if count_x == 3 and count_empty == 1:
-                return 50  # Three in a row with an empty spot
-            elif count_x == 2 and count_empty == 2:
-                return 10  # Two in a row with two empty spots
-            elif count_x == 1 and count_empty == 3:
-                return 1   # One piece with three empty spots
+        # Upper bound of our score as we cannot win immediately
+        max_score = (Position.WIDTH * Position.HEIGHT - 1 - position.nb_moves()) // 2
+        if beta > max_score:
+            beta = max_score
+            if alpha >= beta:
+                return beta  # Prune if window is empty
         
-        # Opponent's pieces - negative scores
-        if count_o > 0 and current_player == 'X':
-            if count_o == 3 and count_empty == 1:
-                return -100  # Block opponent's three in a row (high priority)
-            elif count_o == 2 and count_empty == 2:
-                return -10   # Block potential development
+        # Check transposition table
+        key = position.key()
+        val = self.trans_table.get(key)
+        if val is not None:
+            if val > Position.MAX_SCORE - Position.MIN_SCORE + 1:  # We have a lower bound
+                min_val = val + 2 * Position.MIN_SCORE - Position.MAX_SCORE - 2
+                if alpha < min_val:
+                    alpha = min_val
+                    if alpha >= beta:
+                        return alpha  # Prune if window is empty
+            else:  # We have an upper bound
+                max_val = val + Position.MIN_SCORE - 1
+                if beta > max_val:
+                    beta = max_val
+                    if alpha >= beta:
+                        return beta  # Prune if window is empty
         
-        # Same logic for when current player is O
-        if count_o > 0 and current_player == 'O':
-            if count_o == 3 and count_empty == 1:
-                return 50
-            elif count_o == 2 and count_empty == 2:
-                return 10
-            elif count_o == 1 and count_empty == 3:
-                return 1
+        # Sort moves
+        moves = []
+        for i in range(Position.WIDTH):
+            col = self.column_order[i]
+            move = possible & Position.column_mask(col)
+            if move:
+                # Add base column preference value for early game
+                column_score_bonus = 0
+                if position.nb_moves() < 10:  # Early game bonus
+                    # Center columns get higher bonus
+                    column_values = [-3, -1, 1, 3, 1, -1, -3]
+                    column_score_bonus = column_values[col] * (10 - position.nb_moves())
+                
+                # Add (move, score, column_order_index) to moves list
+                moves.append((move, position.move_score(move) + column_score_bonus, i))
         
-        if count_x > 0 and current_player == 'O':
-            if count_x == 3 and count_empty == 1:
-                return -100
-            elif count_x == 2 and count_empty == 2:
-                return -10
+        # Sort moves by score (DESCENDING) and then by preference (ASCENDING)
+        moves.sort(key=lambda x: (x[1], -x[2]), reverse=True)  # Changed to reverse=True
         
-        return 0
+        for move_data in moves:
+            move = move_data[0]  # Extract just the move component
+            new_pos = position.copy()
+            new_pos.play(move)
+            score = -self.negamax(new_pos, -beta, -alpha, depth + 1, max_depth)
+            
+            if score >= beta:
+                # Save lower bound
+                self.trans_table[key] = score + Position.MAX_SCORE - 2 * Position.MIN_SCORE + 2
+                return score  # Prune
+            
+            if score > alpha:
+                alpha = score  # Reduce window for next exploration
+        
+        # Save upper bound
+        self.trans_table[key] = alpha - Position.MIN_SCORE + 1
+        return alpha
+
+    def evaluate_position(self, position: Position) -> int:
+        """
+        Evaluate a position with heuristics for Connect 4.
+        Higher return value means better position for the current player.
+        
+        Args:
+            position: Position to evaluate
+            
+        Returns:
+            Integer score representing position strength
+        """
+        # Base column values (center columns are worth more)
+        column_values = [-3, -1, 1, 3, 1, -1, -3]
+        
+        # If it's a win-in-one position, return a high score
+        if position.can_win_next():
+            return (Position.WIDTH * Position.HEIGHT - position.nb_moves()) // 2
+        
+        # Calculate material score based on pieces and their positions
+        score = 0
+        
+        # Current player's perspective - determine which bits belong to current player and opponent
+        current_player_bits = position.current_position
+        opponent_bits = position.mask & ~position.current_position
+        
+        # HORIZONTAL PATTERNS
+        for row in range(Position.HEIGHT):
+            for col in range(Position.WIDTH - 3):
+                window_score = 0
+                window_count_current = 0
+                window_count_opponent = 0
+                
+                # Check 4 consecutive positions horizontally
+                for i in range(4):
+                    pos = (col + i) * (Position.HEIGHT + 1) + row
+                    current_bit = (current_player_bits & (1 << pos)) != 0
+                    opponent_bit = (opponent_bits & (1 << pos)) != 0
+                    
+                    if current_bit:
+                        window_count_current += 1
+                    elif opponent_bit:
+                        window_count_opponent += 1
+                
+                # Score the window based on pieces count
+                if window_count_opponent == 0:  # Only current player's pieces
+                    # Weight by number of pieces with a square factor (more pieces = much higher score)
+                    # Also weigh by average column value of the window
+                    col_factor = sum(column_values[col+i] for i in range(4)) / 4
+                    window_score = window_count_current * window_count_current * col_factor
+                elif window_count_current == 0:  # Only opponent's pieces
+                    col_factor = sum(column_values[col+i] for i in range(4)) / 4
+                    window_score = -window_count_opponent * window_count_opponent * col_factor
+                
+                score += window_score
+        
+        # VERTICAL PATTERNS
+        for col in range(Position.WIDTH):
+            for row in range(Position.HEIGHT - 3):
+                window_score = 0
+                window_count_current = 0
+                window_count_opponent = 0
+                
+                # Check 4 consecutive positions vertically
+                for i in range(4):
+                    pos = col * (Position.HEIGHT + 1) + (row + i)
+                    current_bit = (current_player_bits & (1 << pos)) != 0
+                    opponent_bit = (opponent_bits & (1 << pos)) != 0
+                    
+                    if current_bit:
+                        window_count_current += 1
+                    elif opponent_bit:
+                        window_count_opponent += 1
+                
+                # Score the window based on pieces count
+                if window_count_opponent == 0:  # Only current player's pieces
+                    window_score = window_count_current * window_count_current * column_values[col]
+                elif window_count_current == 0:  # Only opponent's pieces
+                    window_score = -window_count_opponent * window_count_opponent * column_values[col]
+                
+                score += window_score
+        
+        # DIAGONAL PATTERNS (RISING) /
+        for row in range(Position.HEIGHT - 3):
+            for col in range(Position.WIDTH - 3):
+                window_score = 0
+                window_count_current = 0
+                window_count_opponent = 0
+                
+                # Check 4 consecutive positions in rising diagonal
+                for i in range(4):
+                    pos = (col + i) * (Position.HEIGHT + 1) + (row + i)
+                    current_bit = (current_player_bits & (1 << pos)) != 0
+                    opponent_bit = (opponent_bits & (1 << pos)) != 0
+                    
+                    if current_bit:
+                        window_count_current += 1
+                    elif opponent_bit:
+                        window_count_opponent += 1
+                
+                # Score the window based on pieces count
+                if window_count_opponent == 0:  # Only current player's pieces
+                    col_factor = sum(column_values[col+i] for i in range(4)) / 4
+                    window_score = window_count_current * window_count_current * col_factor
+                elif window_count_current == 0:  # Only opponent's pieces
+                    col_factor = sum(column_values[col+i] for i in range(4)) / 4
+                    window_score = -window_count_opponent * window_count_opponent * col_factor
+                
+                score += window_score
+        
+        # DIAGONAL PATTERNS (FALLING) \
+        for row in range(3, Position.HEIGHT):
+            for col in range(Position.WIDTH - 3):
+                window_score = 0
+                window_count_current = 0
+                window_count_opponent = 0
+                
+                # Check 4 consecutive positions in falling diagonal
+                for i in range(4):
+                    pos = (col + i) * (Position.HEIGHT + 1) + (row - i)
+                    current_bit = (current_player_bits & (1 << pos)) != 0
+                    opponent_bit = (opponent_bits & (1 << pos)) != 0
+                    
+                    if current_bit:
+                        window_count_current += 1
+                    elif opponent_bit:
+                        window_count_opponent += 1
+                
+                # Score the window based on pieces count
+                if window_count_opponent == 0:  # Only current player's pieces
+                    col_factor = sum(column_values[col+i] for i in range(4)) / 4
+                    window_score = window_count_current * window_count_current * col_factor
+                elif window_count_current == 0:  # Only opponent's pieces
+                    col_factor = sum(column_values[col+i] for i in range(4)) / 4
+                    window_score = -window_count_opponent * window_count_opponent * col_factor
+                
+                score += window_score
+        
+        # Additional bonuses for center columns
+        center_col = Position.WIDTH // 2
+        for row in range(Position.HEIGHT):
+            pos = center_col * (Position.HEIGHT + 1) + row
+            if current_player_bits & (1 << pos):
+                score += 3  # Bonus for controlling center column
+            elif opponent_bits & (1 << pos):
+                score -= 3  # Penalty for opponent controlling center column
+        
+        # Check for pieces that can be connected on the next move
+        # (potential to create threats)
+        for col in range(Position.WIDTH):
+            if position.can_play(col):
+                # Find the row where the piece would land
+                row = 0
+                while row < Position.HEIGHT and (position.mask & (1 << (col * (Position.HEIGHT + 1) + row))):
+                    row += 1
+                
+                if row < Position.HEIGHT:
+                    # Test playing at this position
+                    test_pos = position.copy()
+                    test_pos.play_col(col)
+                    
+                    # Check if this creates future opportunities (2-in-a-row, 3-in-a-row)
+                    # This is a simplified check - in a real implementation you might want to
+                    # check more thoroughly for threats
+                    if test_pos.check_win(test_pos.current_position ^ test_pos.mask):
+                        score += 5 * column_values[col]  # Potential future win
+        
+        return score
+
+    def solve(self, position: Position, weak: bool = False) -> int:
+        # Check for immediate win
+        if position.can_win_next():
+            return (Position.WIDTH * Position.HEIGHT + 1 - position.nb_moves()) // 2
+        
+        # Initialize min-max bounds
+        min_score = -(Position.WIDTH * Position.HEIGHT - position.nb_moves()) // 2
+        max_score = (Position.WIDTH * Position.HEIGHT + 1 - position.nb_moves()) // 2
+        
+        if weak:
+            min_score = -1
+            max_score = 1
+        
+        # Iteratively narrow the min-max exploration window
+        while min_score < max_score:
+            med = min_score + (max_score - min_score) // 2
+            
+            # Adjust median for better performance
+            if med <= 0 and min_score // 2 < med:
+                med = min_score // 2
+            elif med >= 0 and max_score // 2 > med:
+                med = max_score // 2
+                
+            # Use a null depth window to determine if score is greater or smaller than med
+            r = self.negamax(position, med, med + 1)
+            
+            if r <= med:
+                max_score = r
+            else:
+                min_score = r
+                
+        return min_score
+
+    def analyze(self, position: Position, weak: bool = False) -> List[int]:
+        """
+        Analyze all possible moves from a position.
+        
+        Args:
+            position: Position to analyze
+            weak: If true, only distinguish between win/draw/loss
+            
+        Returns:
+            List of scores for each column, INVALID_MOVE for invalid moves
+        """
+        scores = [self.INVALID_MOVE] * Position.WIDTH
+        
+        # Check each column
+        for col in range(Position.WIDTH):
+            if position.can_play(col):
+                if position.is_winning_move(col):
+                    scores[col] = (Position.WIDTH * Position.HEIGHT + 1 - position.nb_moves()) // 2
+                else:
+                    # Create new position with this move
+                    new_pos = Position(position)
+                    new_pos.play_col(col)
+                    scores[col] = -self.solve(new_pos, weak)
+        
+        return scores
+
+    def reset(self) -> None:
+        """Reset the solver state"""
+        self.node_count = 0
+        self.trans_table = {}
+
+    def get_node_count(self) -> int:
+        """Get number of nodes explored in the last search"""
+        return self.node_count
