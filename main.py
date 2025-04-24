@@ -1,8 +1,10 @@
 import sys
 import struct
 import numpy as np
-import random
 import pickle
+import traceback
+import random
+import asyncio
 from collections import defaultdict
 import time
 from typing import List, Dict, Tuple, Optional
@@ -16,28 +18,26 @@ from Position import Position
 from Solver import Solver
 from TranspositionTable import TranspositionTable
 
-def play_vs_ai(solver: Solver):
+def play_vs_ai(solver: Solver, human_turn: bool = False):
     position = Position()
-    human_turn = True  # True for human's turn, False for AI's turn
-    import time  # Add time import for measuring AI thinking time
-    
-    print("Connect Four - Human (O) vs AI (X)")
+    current_turn = human_turn
+    ai_player = 2 if human_turn else 1 
+    human_player = 1 if human_turn else 2
+
+    player_symbols = {1: 'X', 2: 'O'}
+    print(f"Connect Four - Human ({player_symbols[human_player]}) vs AI ({player_symbols[ai_player]})")
     print("Nhập số cột (1-7) để chơi\n")
-    
+
     while True:
         print(position)
-        
-        # Check for draw
         if position.nb_moves() == Position.WIDTH * Position.HEIGHT:
             print("Hòa!")
-            # Save drawn game to opening book with neutral score
             sequence = position.get_played_sequence()
-            solver.add_to_book(sequence, 0)  # 0 indicates a draw
+            solver.add_to_book(sequence, 0)
             print("Đã lưu trận hòa vào battles.txt để AI học hỏi!")
             break
-            
-        if human_turn:
-            # Human's turn
+
+        if current_turn:
             while True:
                 try:
                     col = int(input("Lượt bạn (1-7): ")) - 1
@@ -46,9 +46,8 @@ def play_vs_ai(solver: Solver):
                             position.play_col(col)
                             print(position)
                             print("Bạn thắng! Xuất sắc!")
-                            # Save losing sequence to opening book with human win score
                             sequence = position.get_played_sequence()
-                            solver.add_to_book(sequence, 1)  # 1 indicates human win
+                            solver.add_to_book(sequence, human_player)
                             print("Đã lưu trận đấu vào battles.txt để AI học hỏi!")
                             return
                         position.play_col(col)
@@ -57,62 +56,72 @@ def play_vs_ai(solver: Solver):
                 except ValueError:
                     print("Vui lòng nhập số từ 1-7")
         else:
-            # AI's turn
             print("\nAI đang suy nghĩ...")
             start_time = time.time()
-            
-            # AI player is player 2 (since human goes first)
-            book_move = solver.check_book_move(position, 2)
-            
+            book_move = solver.check_book_move(position, ai_player)
+
             if book_move is not None and book_move >= 0 and position.can_play(book_move):
                 best_col = book_move
                 print(f"AI sử dụng nước đi từ opening book: cột {best_col + 1}")
             else:
-                # If no book move available, use the solver analysis
-                scores = solver.analyze(position)
-                    
-                # Find the best move
+                solver.reset()
+                solver.set_timeout(8.0)
+                try:
+                    scores = solver.analyze(position, weak=False)
+                except TimeoutError:
+                    print("Solver timed out, using heuristic evaluation")
+                    scores = [solver.evaluate_position(position.copy().play_col(col)) if position.can_play(col) else solver.INVALID_MOVE for col in range(Position.WIDTH)]
                 best_col = -1
                 best_score = -float('inf')
-                    
-                for col in range(Position.WIDTH):
-                    if position.can_play(col) and scores[col] > best_score and scores[col] != solver.INVALID_MOVE:
-                        best_score = scores[col]
-                        best_col = col
 
-                # If AI has a winning move, add a message
-                if best_col != -1 and position.is_winning_move(best_col):
-                    print("AI đã tìm thấy nước đi chiến thắng!")
-            
+                for col in range(Position.WIDTH):
+                    if position.can_play(col) and position.is_winning_move(col):
+                        best_col = col
+                        break
+
+                if best_col == -1:
+                    for col in range(Position.WIDTH):
+                        if position.can_play(col) and scores[col] != solver.INVALID_MOVE and scores[col] > best_score:
+                            best_score = scores[col]
+                            best_col = col
+
+                if best_col == -1:
+                    print("No valid solver move, falling back to column order")
+                    for col in solver.column_order:
+                        if position.can_play(col):
+                            best_col = col
+                            break
+                    if best_col == -1:
+                        valid_moves = [col for col in range(Position.WIDTH) if position.can_play(col)]
+                        best_col = random.choice(valid_moves) if valid_moves else -1
+
             if best_col != -1:
                 end_time = time.time()
                 elapsed = end_time - start_time
                 print(f"AI suy nghĩ trong: {elapsed:.2f} giây")
                 print(f"AI chọn cột {best_col + 1}")
-                
+
                 if position.is_winning_move(best_col):
                     position.play_col(best_col)
                     print(position)
                     print("AI thắng! Hãy thử lại!")
-                    
-                    # Save winning sequence to opening book with AI win score
                     sequence = position.get_played_sequence()
-                    solver.add_to_book(sequence, 2)  # 2 indicates AI win
+                    solver.add_to_book(sequence, ai_player)  # Save with AI's player number
                     print("Đã lưu chiến thắng vào battles.txt để AI học hỏi!")
-                    
                     return
-                    
+
                 position.play_col(best_col)
             else:
                 print("AI không tìm được nước đi hợp lệ!")
                 return
-        
-        human_turn = not human_turn
+
+        current_turn = not current_turn
     
 class GameState(BaseModel):
     board: List[List[int]]
     current_player: int
     valid_moves: List[int]
+    is_new_game: bool = False
 
 class AIResponse(BaseModel):
     move: int
@@ -128,84 +137,127 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize solver for API
 api_solver = Solver()
-
-# Time limit parameters
-TIME_LIMIT_MS = 8000 
 
 @app.get("/api/test")
 async def health_check():
     return {"status": "ok", "message": "Server is running"}
-    
+
 @app.post("/api/connect4-move")
 async def make_move(game_state: GameState) -> AIResponse:
     try:
-        # Convert board from request to Position object
-        position = Position.from_2d_array(game_state.board)
+        print(f"Received game state: {game_state}")
         
-        # Get current player from game state
+        # Use the convert_to_bitboard method instead of from_2d_array
+        position_bits, mask_bits, moves = Position.convert_to_bitboard(game_state.board, game_state.current_player)
+        
+        # Create a new Position instance with the converted values
+        position = Position(current_position=position_bits, mask=mask_bits, moves=moves)
+        
+        print(f"Bitboard: current_position={bin(position.current_position)}, mask={bin(position.mask)}")
+        print(f"Converted position: {position}")
         ai_player = game_state.current_player
+        print(f"Current player: {ai_player}")
+
+        # Debug valid moves from both sources
+        api_valid_moves = game_state.valid_moves
+        pos_valid_moves = [col for col in range(Position.WIDTH) if position.can_play(col)]
+        print(f"API valid moves: {api_valid_moves}")
+        print(f"Position valid moves: {pos_valid_moves}")
         
-        # Check valid moves
-        valid_moves = [col for col in range(Position.WIDTH) if position.can_play(col)]
+        # Trust the game state's valid moves over the Position class calculation
+        valid_moves = api_valid_moves if api_valid_moves else pos_valid_moves
+        
+        print(f"Using valid moves: {valid_moves}")
         if not valid_moves:
+            print("No valid moves available")
             raise ValueError("No valid moves available")
 
-        # Start timing the AI thinking process
         start_time = time.time()
-
-        # First check for a move from the opening book
+        print(f"Checking book move at: {start_time}")
         book_move = api_solver.check_book_move(position, ai_player)
-        
+        print(f"Book move result: {book_move}")
+
         if book_move is not None and book_move in valid_moves:
-            # Found a move in the opening book
             end_time = time.time()
             is_winning = position.is_winning_move(book_move)
+            print(f"Using book move: {book_move}, is_winning: {is_winning}, time: {end_time - start_time}")
             return AIResponse(
-                move=book_move, 
+                move=book_move,
                 is_winning_move=is_winning,
                 elapsed_time=end_time - start_time
             )
         
-        # If no book move available, use the solver analysis
-        api_solver.reset()  # Reset solver state before analysis
-        scores = api_solver.analyze(position)
-        
-        # Find the best move
+        print("Checking for winning moves before analysis")
+        for col in valid_moves:
+            if position.is_winning_move(col):
+                end_time = time.time()
+                print(f"Found immediate winning move: {col}")
+                return AIResponse(
+                    move=col,
+                    is_winning_move=True,
+                    elapsed_time=end_time - start_time
+                )
+
+        print(f"Solver state before reset: {api_solver}")
+        api_solver.reset()
+        print(f"Solver state after reset: {api_solver}")
+        api_solver.set_timeout(9.0)
+        print(f"Analyzing position: {position}")
+
+        try:
+            scores = await asyncio.wait_for(
+                asyncio.to_thread(lambda: api_solver.analyze(position, weak=False)), 
+                timeout=9.0
+            )
+            print(f"Analysis completed, scores: {scores}")
+        except asyncio.TimeoutError:
+            print("Solver timed out")
+            random_col = random.choice(valid_moves)
+            end_time = time.time()
+            print(f"Falling back to random move: {random_col}")
+            return AIResponse(
+                move=random_col,
+                is_winning_move=position.is_winning_move(random_col),
+                elapsed_time=end_time - start_time
+            )
+
         best_col = -1
         best_score = -float('inf')
-        
-        for col in range(Position.WIDTH):
-            if position.can_play(col) and scores[col] > best_score:
+        print("Selecting best move from scores")
+        for col in valid_moves:  # Use valid_moves instead of range(Position.WIDTH)
+            if scores[col] > best_score:
                 best_score = scores[col]
                 best_col = col
-        
+                print(f"New best move: {best_col} with score: {best_score}")
+
         if best_col != -1:
             end_time = time.time()
             elapsed = end_time - start_time
             is_winning = position.is_winning_move(best_col)
-            
+            print(f"Selected move: {best_col}, is_winning: {is_winning}, elapsed: {elapsed}")
             return AIResponse(
                 move=best_col,
                 is_winning_move=is_winning,
                 elapsed_time=elapsed
             )
         else:
-            # If analysis fails, use a fallback strategy
-            # Prioritize center column, then columns close to center
-            for col in api_solver.column_order:
-                if col in valid_moves:
-                    end_time = time.time()
-                    return AIResponse(
-                        move=col,
-                        is_winning_move=position.is_winning_move(col),
-                        elapsed_time=end_time - start_time
-                    )
-            
-            # Last resort: random move
+            print("No best move found, checking column order")
+            preferred_columns = [col for col in api_solver.column_order if col in valid_moves]
+            if preferred_columns:
+                col = preferred_columns[0]
+                end_time = time.time()
+                is_winning = position.is_winning_move(col)
+                print(f"Using column order move: {col}, is_winning: {is_winning}")
+                return AIResponse(
+                    move=col,
+                    is_winning_move=is_winning,
+                    elapsed_time=end_time - start_time
+                )
+
             random_col = random.choice(valid_moves)
             end_time = time.time()
+            print(f"Falling back to random move: {random_col}")
             return AIResponse(
                 move=random_col,
                 is_winning_move=position.is_winning_move(random_col),
@@ -213,13 +265,18 @@ async def make_move(game_state: GameState) -> AIResponse:
             )
 
     except Exception as e:
-        # Handle exceptions, return a safe move if possible
+        print(f"Error occurred: {str(e)}")
+        print("Stack trace:")
+        traceback.print_exc()
         if 'valid_moves' in locals() and valid_moves:
-            col = valid_moves[len(valid_moves) // 2]  # Middle column if possible
+            col = random.choice(valid_moves)
+            print(f"Falling back to random valid move: {col}")
             return AIResponse(move=col)
-        # If no safe move can be found, report error
+        elif 'game_state' in locals() and hasattr(game_state, 'valid_moves') and game_state.valid_moves:
+            col = random.choice(game_state.valid_moves)
+            print(f"Falling back to random game state move: {col}")
+            return AIResponse(move=col)
         raise HTTPException(status_code=400, detail=str(e))
-
 def main():
     solver = Solver()
     weak = False
@@ -246,9 +303,8 @@ def main():
         elif not arg.startswith('-') and not arg.isdigit():
             input_from_stdin = True
 
-    # Load opening book if specified
     if opening_book_file:
-        if solver.lo_book(opening_book_file):
+        if solver.load_book(opening_book_file):
             print("Opening book loaded successfully")
         else:
             print("Failed to load opening book")
@@ -258,8 +314,8 @@ def main():
         return
     
     if api_mode:
-        print("Khởi động API Connect Four AI trên cổng 8080...")
-        uvicorn.run(app, host="0.0.0.0", port=8080)
+        print("Khởi động API Connect Four AI trên cổng 10000...")
+        uvicorn.run(app, host="0.0.0.0", port=10000)
         return
     
     if not sys.stdin.isatty() and input_from_stdin:

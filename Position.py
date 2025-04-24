@@ -261,10 +261,6 @@ class Position:
         board = []
         # Hiển thị số cột
         board.append("  " + "  ".join([str(i+1) for i in range(Position.WIDTH)]))
-        
-        # Xác định người chơi hiện tại dựa trên số nước đi
-        # Nếu số nước đi chẵn: lượt của người chơi (O)
-        # Nếu số nước đi lẻ: lượt của AI (X)
         current_player_is_human = (self.moves % 2 == 0)
         
         # Duyệt qua từng ô
@@ -290,69 +286,24 @@ class Position:
         
         return "\n".join(board)
 
-    @classmethod
-    def from_2d_array(cls, board: List[List[int]]) -> 'Position':
-        """Convert a 2D board array to a Position object"""
-        pos = cls()
-        pos._played_sequence = []  # Initialize the sequence tracking
-        
-        # Create a temporary board to track piece placement
-        temp_board = [[0 for _ in range(cls.WIDTH)] for _ in range(cls.HEIGHT)]
-        
-        # First, build the board configuration
-        for row in range(cls.HEIGHT):
-            for col in range(cls.WIDTH):
-                temp_board[row][col] = board[row][col]
-        
-        # Reconstruct the moves sequence
-        # We need to find a valid sequence of moves that would result in this board
-        
-        # Count pieces for each player
-        p1_count = sum(row.count(1) for row in board)
-        p2_count = sum(row.count(2) for row in board)
-        
-        # Determine whose turn it is based on piece count
-        current_player = 1 if p1_count == p2_count else 2
-        
-        # Start with an empty position
-        position = cls()
-        position._played_sequence = []
-        
-        # Reconstruct the board from bottom up
-        # This is a simplified approach and may not reproduce the exact sequence,
-        # but will create a valid sequence resulting in the same board state
-        moves_sequence = []
-        
-        # Process columns from bottom to top
-        for col in range(cls.WIDTH):
-            for row in range(cls.HEIGHT-1, -1, -1):  # Start from bottom row
-                if board[row][col] != 0:  # If there's a piece
-                    moves_sequence.append((row, col, board[row][col]))
-        
-        # Sort moves by row (bottom up) to ensure valid placement
-        moves_sequence.sort(key=lambda x: -x[0])
-        
-        # Apply moves in order, switching players as needed
-        current_player = 1  # Start with player 1
-        for _, col, player in moves_sequence:
-            # Switch player if needed
-            if player != current_player:
-                position.current_position ^= position.mask
-                current_player = player
-            
-            # Make the move
-            position.play_col(col)
-            position._played_sequence.append(col)
-            
-            # Switch back to player 1 for the next move
-            position.current_position ^= position.mask
-            current_player = 1 if current_player == 2 else 2
-        
-        # Make sure we end with the correct player's turn
-        if p1_count > p2_count:  # Player 2's turn
-            position.current_position ^= position.mask
-        
-        return position
+    @staticmethod
+    def convert_to_bitboard(board: List[List[int]], current_player: int):
+        WIDTH, HEIGHT = 7, 6
+        position = np.uint64(0)
+        mask = np.uint64(0)
+        moves = 0
+
+        # Duyệt theo hàng (từ dưới lên)
+        for row in reversed(range(HEIGHT)):  # Hàng 5 là dưới cùng
+            for col in range(WIDTH):
+                if board[row][col] != 0:  # Truy cập [hàng][cột]
+                    bit = col * (HEIGHT + 1) + (HEIGHT - 1 - row)  # Tính bit chính xác
+                    mask |= np.uint64(1) << np.uint64(bit)
+                    if board[row][col] == current_player:
+                        position |= np.uint64(1) << np.uint64(bit)
+                    moves += 1
+
+        return position, mask, moves
     # Ensure the Position class has the get_played_sequence method
     def get_played_sequence(self) -> str:
         """
