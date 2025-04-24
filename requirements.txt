@@ -1,9 +1,5 @@
-numpy
 fastapi==0.115.5
 uvicorn[standard]==0.32.0
 python-multipart==0.0.17
 pydantic==2.10.6
-<<<<<<< HEAD
 numpy
-=======
->>>>>>> fdfcfaddfa6423c7e2e88d276296b5e2223966de
