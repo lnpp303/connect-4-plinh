@@ -41,26 +41,24 @@ class OpeningBook:
     def find_next_move(self, position: Position, ai_player: int) -> Optional[int]:
         """Find the next move from the opening book"""
         current_sequence = position.get_played_sequence()
-        sequence_length = len(current_sequence)
-
-        # If first move and AI is player 1, use preferred first move
-        if sequence_length == 0 and ai_player == 1:
+        if len(current_sequence) == 0 and ai_player == 1:
             return self.get_first_move()
-
-        # Determine if it's AI's turn
-        ai_plays_first = ai_player == 1
-        next_move_is_odd = sequence_length % 2 == 0
-        ai_should_play = (ai_plays_first and next_move_is_odd) or (not ai_plays_first and not next_move_is_odd)
-        if not ai_should_play:
-            return None
 
         # Check in-memory winning sequences
         for sequence, data in self.winning_sequences.items():
-            if sequence.startswith(current_sequence) and len(sequence) > sequence_length:
-                next_move = int(sequence[sequence_length]) - 1
+            if sequence.startswith(current_sequence) and len(sequence) > len(current_sequence):
+                next_move = int(sequence[len(current_sequence)]) - 1  # Convert to 0-indexed for the game
                 if position.can_play(next_move) and data["winner"] in {ai_player, 0}:
                     print(f"Using in-memory book move: {next_move} from sequence {sequence}")
                     return next_move
+
+        # Check battles.txt
+        battle_move = self.check_battles_book(current_sequence, ai_player)
+        if battle_move is not None and position.can_play(battle_move):
+            print(f"Using battles.txt move: {battle_move}")
+            return battle_move
+
+        return None
 
         # Check battles.txt
         battle_move = self.check_battles_book(current_sequence, ai_player)
